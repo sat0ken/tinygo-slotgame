@@ -9,14 +9,16 @@ import (
 )
 
 func main() {
-	display := initBoard()
-	g := newGame(display)
+	display, lay := initBoard()
+	g := newGame(display, lay)
+	// ボタンが 1 つだけのボードは、押すたびに左のリールから順に止める。
+	g.oneButton = len(buttons) == 1
 
 	var prev [3]bool
 	for {
 		start := time.Now()
 
-		var down [3]bool
+		var down [3]bool // 1 ボタンのときは down[0] だけを使う
 		for i, b := range buttons {
 			down[i] = !b.Get() // どのボードも押すと Low
 		}

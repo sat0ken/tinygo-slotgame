@@ -14,9 +14,9 @@ import (
 const displayInversion = false
 
 // 左・中・右リールのストップボタン。本体前面の A / B / C がリールの真下に並ぶ。
-var buttons = [3]machine.Pin{machine.BUTTON_A, machine.BUTTON_B, machine.BUTTON_C}
+var buttons = []machine.Pin{machine.BUTTON_A, machine.BUTTON_B, machine.BUTTON_C}
 
-func initBoard() *ili9341.Device {
+func initBoard() (screen, layout) {
 	// スピーカーは使わないが、浮いているとノイズが出るので Low に固定する。
 	spk := machine.SPEAKER_PIN
 	spk.Configure(machine.PinConfig{Mode: machine.PinOutput})
@@ -38,11 +38,11 @@ func initBoard() *ili9341.Device {
 
 	display := ili9341.NewSPI(machine.SPI2, machine.LCD_DC_PIN, machine.LCD_SS_PIN, machine.LCD_RST_PIN)
 	display.Configure(ili9341.Config{
-		Width:            screenW,
-		Height:           screenH,
+		Width:            320,
+		Height:           240,
 		DisplayInversion: displayInversion,
 	})
 	display.SetRotation(ili9341.Rotation0Mirror) // M5Stack の横向き
 	bl.High()
-	return display
+	return display, layoutWide
 }

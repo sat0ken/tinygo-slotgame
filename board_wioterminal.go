@@ -15,9 +15,9 @@ const displayInversion = false
 
 // 左・中・右リールのストップボタン。本体上面のボタンは、画面側から見て
 // 左から KEY_C / KEY_B / KEY_A の順に並ぶ。
-var buttons = [3]machine.Pin{machine.WIO_KEY_C, machine.WIO_KEY_B, machine.WIO_KEY_A}
+var buttons = []machine.Pin{machine.WIO_KEY_C, machine.WIO_KEY_B, machine.WIO_KEY_A}
 
-func initBoard() *ili9341.Device {
+func initBoard() (screen, layout) {
 	// ブザーは使わないが、浮いているとノイズが出るので Low に固定する。
 	bz := machine.WIO_BUZZER
 	bz.Configure(machine.PinConfig{Mode: machine.PinOutput})
@@ -44,5 +44,5 @@ func initBoard() *ili9341.Device {
 	})
 	display.SetRotation(ili9341.Rotation270)
 	bl.High()
-	return display
+	return display, layoutWide
 }

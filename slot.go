@@ -1,7 +1,7 @@
 package main
 
 // ハードウェアに依存しない部分（図柄の描画、リール、役判定、ゲーム進行）。
-// machine / ili9341 を import しないので、ホストの Go でもテスト・画像出力できる。
+// machine や液晶ドライバを import しないので、ホストの Go でもテスト・画像出力できる。
 
 import (
 	_ "embed"
@@ -16,10 +16,8 @@ import (
 )
 
 const (
-	screenW = 320
 	screenH = 240
 
-	symW        = 84
 	symH        = 50
 	visibleRows = 3
 	reelH       = symH * visibleRows
@@ -39,7 +37,36 @@ const (
 	markerCY = 117
 )
 
-var reelX = [3]int16{26, 118, 210}
+// layout は画面の幅によって変わる配置。縦方向の配置はどの画面も共通（高さ 240）。
+type layout struct {
+	screenW  int16
+	symW     int      // 1コマの幅
+	reelX    [3]int16 // 各リールの左端
+	markerX  int16    // 左の三角マーカーの左端（右は左右対称）
+	markerW  int16    // 三角マーカーの幅
+	gameOver string   // GAME OVER のメッセージ
+}
+
+var (
+	// 320×240（M5Stack, Wio Terminal）。リールの中心をボタン A/B/C の真上に合わせる。
+	layoutWide = layout{
+		screenW:  320,
+		symW:     84,
+		reelX:    [3]int16{26, 118, 210},
+		markerX:  8,
+		markerW:  10,
+		gameOver: "GAME OVER - PRESS ANY BUTTON",
+	}
+	// 240×240（RP2040-Zero + ST7789）。リールを細くし、長いメッセージは短くする。
+	layoutSquare = layout{
+		screenW:  240,
+		symW:     70,
+		reelX:    [3]int16{8, 85, 162},
+		markerX:  0,
+		markerW:  5,
+		gameOver: "GAME OVER",
+	}
+)
 
 // 図柄
 const (
@@ -78,20 +105,20 @@ var (
 	colGreen       = color.RGBA{40, 150, 50, 255}
 )
 
-// screen は ili9341.Device のうち、このゲームが使うメソッドだけを抜き出したもの。
+// screen は液晶ドライバ（ili9341, st7789）のうち、このゲームが使うメソッドだけを抜き出したもの。
 type screen interface {
 	drivers.Displayer
 	FillRectangle(x, y, width, height int16, c color.RGBA) error
-	DrawRectangle(x, y, w, h int16, c color.RGBA) error
-	DrawFastVLine(x, y0, y1 int16, c color.RGBA) error
 	DrawBitmap(x, y int16, bitmap pixel.Image[pixel.RGB565BE]) error
 }
 
 // ---- 図柄の事前描画 ----
 
 // canvas は pixel.Image に描くための drivers.Displayer。tinyfont からも使える。
+// 図柄は幅 84 のコマを基準にした座標で描き、ox だけ横にずらして実際の幅のコマに収める。
 type canvas struct {
 	img pixel.Image[pixel.RGB565BE]
+	ox  int
 }
 
 func (c canvas) Size() (int16, int16) {
@@ -100,6 +127,7 @@ func (c canvas) Size() (int16, int16) {
 }
 
 func (c canvas) SetPixel(x, y int16, col color.RGBA) {
+	x += int16(c.ox)
 	w, h := c.img.Size()
 	if x < 0 || y < 0 || int(x) >= w || int(y) >= h {
 		return
@@ -191,14 +219,14 @@ func abs(v int) int {
 	return v
 }
 
-func makeSymbols() [numSymbols]pixel.Image[pixel.RGB565BE] {
+func makeSymbols(symW int) [numSymbols]pixel.Image[pixel.RGB565BE] {
 	var imgs [numSymbols]pixel.Image[pixel.RGB565BE]
 	for i := range imgs {
 		imgs[i] = pixel.NewImage[pixel.RGB565BE](symW, symH)
-		c := canvas{imgs[i]}
-		c.fillRect(0, 0, symW, symH, colCell)
-		c.fillRect(0, symH-1, symW, 1, colDivider)
-		drawSymbol(c, uint8(i))
+		bg := canvas{img: imgs[i]}
+		bg.fillRect(0, 0, symW, symH, colCell)
+		bg.fillRect(0, symH-1, symW, 1, colDivider)
+		drawSymbol(canvas{img: imgs[i], ox: symW/2 - 42}, uint8(i))
 	}
 	return imgs
 }
@@ -209,10 +237,18 @@ func drawSymbol(c canvas, sym uint8) {
 		c.textCentered(&freesans.Bold24pt7b, 44, 44, "7", colDarkRed)
 		c.textCentered(&freesans.Bold24pt7b, 42, 42, "7", colRed)
 	case symBar:
-		c.fillRect(8, 11, 68, 28, colBlack)
-		c.fillRect(10, 13, 64, 2, colWhite)
-		c.fillRect(10, 35, 64, 2, colWhite)
-		c.textCentered(&freesans.Bold12pt7b, 42, 33, "BAR", colWhite)
+		// 枠はコマの幅に合わせる（幅 84 で 68）。収まらなければ文字を小さくする。
+		w, _ := c.img.Size()
+		bw := w - 16
+		x := 42 - bw/2
+		c.fillRect(x, 11, bw, 28, colBlack)
+		c.fillRect(x+2, 13, bw-4, 2, colWhite)
+		c.fillRect(x+2, 35, bw-4, 2, colWhite)
+		if _, tw := tinyfont.LineWidth(&freesans.Bold12pt7b, "BAR"); int(tw)+10 <= bw {
+			c.textCentered(&freesans.Bold12pt7b, 42, 33, "BAR", colWhite)
+		} else {
+			c.textCentered(&freesans.Bold9pt7b, 42, 31, "BAR", colWhite)
+		}
 	case symBell:
 		c.sprite(42, 3, gopherBrown)
 	case symGrape:
@@ -279,9 +315,10 @@ func (r *reel) center() uint8 {
 	return r.strip[((symH-r.offset)%t+t)%t/symH]
 }
 
-// render はリールの見えている部分を buf (84×150) に描く。
+// render はリールの見えている部分を buf（コマ幅×150）に描く。
 func (r *reel) render(buf pixel.Image[pixel.RGB565BE], syms *[numSymbols]pixel.Image[pixel.RGB565BE]) {
-	const rowBytes = symW * 2
+	w, _ := buf.Size()
+	rowBytes := w * 2
 	dst := buf.RawBuffer()
 	t := r.total()
 	for y := 0; y < reelH; y++ {
@@ -331,6 +368,8 @@ const (
 
 type game struct {
 	scr       screen
+	lay       layout
+	oneButton bool // true ならボタン 1 つで、押すたびに左のリールから順に止める
 	syms      [numSymbols]pixel.Image[pixel.RGB565BE]
 	reelImg   pixel.Image[pixel.RGB565BE]
 	reels     [3]reel
@@ -339,10 +378,10 @@ type game struct {
 	spinStart time.Time
 }
 
-func newGame(scr screen) *game {
-	g := &game{scr: scr, credit: startCredit}
-	g.syms = makeSymbols()
-	g.reelImg = pixel.NewImage[pixel.RGB565BE](symW, reelH)
+func newGame(scr screen, lay layout) *game {
+	g := &game{scr: scr, lay: lay, credit: startCredit}
+	g.syms = makeSymbols(lay.symW)
+	g.reelImg = pixel.NewImage[pixel.RGB565BE](lay.symW, reelH)
 	for i := range g.reels {
 		g.reels[i].strip = strips[i]
 	}
@@ -350,8 +389,8 @@ func newGame(scr screen) *game {
 	g.drawCredit()
 	for i := range g.reels {
 		g.drawReel(i)
-		g.drawLabel(i)
 	}
+	g.drawLabels()
 	g.drawMessage("PRESS ANY BUTTON", colYellow)
 	return g
 }
@@ -381,15 +420,22 @@ func (g *game) step(pressed [3]bool, now time.Time) {
 		g.spinStart = now
 		for i := range g.reels {
 			g.reels[i].start()
-			g.drawLabel(i)
 		}
+		g.drawLabels()
 		g.state = stateSpinning
 
 	case stateSpinning:
 		if now.Sub(g.spinStart) >= stopLockout {
-			for i, p := range pressed {
-				if p {
+			if g.oneButton {
+				if i := g.nextReel(); anyPressed && i >= 0 {
 					g.reels[i].requestStop()
+					g.drawLabels()
+				}
+			} else {
+				for i, p := range pressed {
+					if p {
+						g.reels[i].requestStop()
+					}
 				}
 			}
 		}
@@ -422,13 +468,23 @@ func (g *game) step(pressed [3]bool, now time.Time) {
 	}
 }
 
+// nextReel は 1 ボタンのときに次に止めるリール（回転中で停止要求の出ていない一番左）を返す。無ければ -1。
+func (g *game) nextReel() int {
+	for i := range g.reels {
+		if g.reels[i].spinning && !g.reels[i].stopping {
+			return i
+		}
+	}
+	return -1
+}
+
 func (g *game) finishSpin() {
 	win, msg := judge(g.reels[0].center(), g.reels[1].center(), g.reels[2].center())
 	g.credit += win
 	g.drawCredit()
 	switch {
 	case g.credit < bet:
-		g.drawMessage("GAME OVER - PRESS ANY BUTTON", colRed)
+		g.drawMessage(g.lay.gameOver, colRed)
 		g.state = stateGameOver
 	case win > 0:
 		g.drawMessage(msg, colYellow)
@@ -442,51 +498,77 @@ func (g *game) finishSpin() {
 // ---- 画面描画 ----
 
 func (g *game) drawStatic() {
-	s := g.scr
-	s.FillRectangle(0, 0, screenW, screenH, colBG)
+	s, l := g.scr, &g.lay
+	s.FillRectangle(0, 0, l.screenW, screenH, colBG)
 	tinyfont.WriteLine(s, &freesans.Bold12pt7b, 8, 26, "SLOT", colYellow)
-	for _, x := range reelX {
-		s.DrawRectangle(x-1, reelY-1, symW+2, reelH+2, colFrame)
-		s.DrawRectangle(x-2, reelY-2, symW+4, reelH+4, colFrame)
+	w := int16(l.symW)
+	for _, x := range l.reelX {
+		g.drawFrame(x-1, reelY-1, w+2, reelH+2)
+		g.drawFrame(x-2, reelY-2, w+4, reelH+4)
 	}
 	// 有効ラインを指す内向きの三角マーカー
-	for i := int16(0); i < 10; i++ {
-		h := 9 - i
-		s.DrawFastVLine(8+i, markerCY-h, markerCY+h, colLine)
-		s.DrawFastVLine(311-i, markerCY-h, markerCY+h, colLine)
+	for i := int16(0); i < l.markerW; i++ {
+		h := l.markerW - 1 - i
+		s.FillRectangle(l.markerX+i, markerCY-h, 1, 2*h+1, colLine)
+		s.FillRectangle(l.screenW-1-l.markerX-i, markerCY-h, 1, 2*h+1, colLine)
 	}
+}
+
+// drawFrame は 1px の枠を描く。
+func (g *game) drawFrame(x, y, w, h int16) {
+	s := g.scr
+	s.FillRectangle(x, y, w, 1, colFrame)
+	s.FillRectangle(x, y+h-1, w, 1, colFrame)
+	s.FillRectangle(x, y, 1, h, colFrame)
+	s.FillRectangle(x+w-1, y, 1, h, colFrame)
 }
 
 func (g *game) drawCredit() {
-	s := g.scr
-	s.FillRectangle(150, 4, 170, 30, colBG)
+	s, sw := g.scr, g.lay.screenW
+	// 右寄せの「CREDIT n」を消す範囲。左の「SLOT」にはかからないようにする。
+	_, tw := tinyfont.LineWidth(&freesans.Bold12pt7b, "SLOT")
+	x := max(sw-170, 8+int16(tw)+4)
+	s.FillRectangle(x, 4, sw-x, 30, colBG)
 	str := "CREDIT " + strconv.Itoa(g.credit)
 	_, w := tinyfont.LineWidth(&freesans.Bold12pt7b, str)
-	tinyfont.WriteLine(s, &freesans.Bold12pt7b, 312-int16(w), 26, str, colWhite)
+	tinyfont.WriteLine(s, &freesans.Bold12pt7b, sw-8-int16(w), 26, str, colWhite)
 }
 
 func (g *game) clearMessage() {
-	g.scr.FillRectangle(0, msgY, screenW, msgH, colBG)
+	g.scr.FillRectangle(0, msgY, g.lay.screenW, msgH, colBG)
 }
 
 func (g *game) drawMessage(msg string, col color.RGBA) {
 	g.clearMessage()
 	_, w := tinyfont.LineWidth(&freesans.Bold9pt7b, msg)
-	tinyfont.WriteLine(g.scr, &freesans.Bold9pt7b, (screenW-int16(w))/2, 213, msg, col)
+	tinyfont.WriteLine(g.scr, &freesans.Bold9pt7b, (g.lay.screenW-int16(w))/2, 213, msg, col)
 }
 
 func (g *game) drawReel(i int) {
 	g.reels[i].render(g.reelImg, &g.syms)
-	g.scr.DrawBitmap(reelX[i], reelY, g.reelImg)
+	g.scr.DrawBitmap(g.lay.reelX[i], reelY, g.reelImg)
 }
 
+func (g *game) drawLabels() {
+	for i := range g.reels {
+		g.drawLabel(i)
+	}
+}
+
+// drawLabel は STOP ラベルを描く。回転中は赤、停止中は灰。
+// 1 ボタンのときは、次に止まるリールだけを赤にし、順番待ちのリールは暗い赤、
+// 停止要求を出したリールは灰にする。
 func (g *game) drawLabel(i int) {
 	bg, fg := colGray, colBG
-	if g.reels[i].spinning {
+	switch r := &g.reels[i]; {
+	case !r.spinning, g.oneButton && r.stopping:
+	case g.oneButton && i != g.nextReel():
+		bg, fg = colDarkRed, colGray
+	default:
 		bg, fg = colRed, colWhite
 	}
-	x := reelX[i]
-	g.scr.FillRectangle(x, labelY, symW, labelH, bg)
-	_, w := tinyfont.LineWidth(&freesans.Bold9pt7b, "STOP")
-	tinyfont.WriteLine(g.scr, &freesans.Bold9pt7b, x+(symW-int16(w))/2, 236, "STOP", fg)
+	x, w := g.lay.reelX[i], int16(g.lay.symW)
+	g.scr.FillRectangle(x, labelY, w, labelH, bg)
+	_, tw := tinyfont.LineWidth(&freesans.Bold9pt7b, "STOP")
+	tinyfont.WriteLine(g.scr, &freesans.Bold9pt7b, x+(w-int16(tw))/2, 236, "STOP", fg)
 }

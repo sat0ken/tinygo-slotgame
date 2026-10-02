@@ -1,6 +1,6 @@
 # TinyGo Slot Game
 
-M5Stack Basic と Wio Terminal で遊べる、3リールの目押しスロットマシンです。TinyGo で書いています。
+M5Stack Basic、Wio Terminal、Waveshare RP2040-Zero と ST7789 液晶を使った基板（自作基板、gocon2026badge）で遊べる、3リールの目押しスロットマシンです。TinyGo で書いています。
 
 ![画面イメージ](docs/screenshot.png)
 
@@ -14,6 +14,21 @@ M5Stack Basic と Wio Terminal で遊べる、3リールの目押しスロット
 | --- | --- | --- |
 | M5Stack Basic / Gray | `m5stack` | 前面の A / B / C |
 | Wio Terminal | `wioterminal` | 上面の KEY_C / KEY_B / KEY_A（画面側から見て左から） |
+| RP2040-Zero 自作基板 + ST7789（240×240） | `waveshare-rp2040-zero` | A ボタンだけ（SW1、GP3） |
+| gocon2026badge（RP2040-Zero + ST7789 1.54"） | `waveshare-rp2040-zero` + `-tags gocon2026badge` | A ボタンだけ（BTN_A、GP3） |
+
+A ボタンだけのボードでは、押すたびに左 → 中 → 右の順にリールが止まります。次に止まるリールの STOP ラベルが赤く光ります。
+
+RP2040-Zero の 2 つの基板は、どちらも ST7789 を SPI1（SCK=GP10、SDA=GP11）につなぎます。
+
+| 液晶のピン | 自作基板 | gocon2026badge |
+| --- | --- | --- |
+| RESET | GP9 | GP15 |
+| DC | GP12 | GP14 |
+| CS | GP13 | GP13 |
+| BL | GP14 | GP12 |
+
+ボタンは GPIO と GND の間につなぎます（内部プルアップを使います）。240×240 の画面では、リールを少し細くして表示します。
 
 ## 必要なもの
 
@@ -30,16 +45,22 @@ tinygo flash -target=m5stack -port=/dev/ttyUSB0 .
 
 # Wio Terminal
 tinygo flash -target=wioterminal .
+
+# RP2040-Zero 自作基板
+tinygo flash -target=waveshare-rp2040-zero .
+
+# gocon2026badge
+tinygo flash -target=waveshare-rp2040-zero -tags gocon2026badge .
 ```
 
-ポート名は環境に合わせて変えてください。Wio Terminal で書き込みに失敗するときは、電源スイッチを下に素早く2回スライドしてブートローダーに入れてから、もう一度実行します。
+ポート名は環境に合わせて変えてください。書き込みに失敗するときは、ボードをブートローダーに入れてからもう一度実行します。Wio Terminal は電源スイッチを下に素早く2回スライド、RP2040-Zero は BOOT ボタンを押しながら RESET を押します。
 
 書き込まずにビルドだけ確かめるときは `tinygo build -target=m5stack -size short -o slot_m5stack.bin .` のようにします。
 
 ## 遊び方
 
 1. どのボタンでもスタートします。1ゲームで 3 クレジットを使います
-2. 回転中にボタンを押すと、対応するリールが止まります。止める順番は自由です
+2. 回転中にボタンを押すと、対応するリールが止まります。止める順番は自由です（A ボタンだけのボードでは、押すたびに左から順に止まります）
 3. 3本とも止まったら、中段（赤い線と ◀▶ で挟まれた段）の1ラインで役を判定します
 4. クレジットが 3 未満になると GAME OVER です。ボタンを押すと 50 クレジットに戻ります
 
@@ -63,12 +84,14 @@ tinygo flash -target=wioterminal .
 | ファイル | 内容 |
 | --- | --- |
 | `main.go` | メインループ（TinyGo 用） |
-| `board_m5stack.go` / `board_wioterminal.go` | ボードごとの初期化とボタンの割り当て |
+| `board_m5stack.go` / `board_wioterminal.go` | ボードごとの初期化、ボタンの割り当て、画面の配置 |
+| `board_st7789.go` | RP2040-Zero + ST7789 の基板に共通の初期化 |
+| `board_rp2040zero.go` / `board_gocon2026badge.go` | RP2040-Zero の各基板のピン |
 | `slot.go` | ハードウェアに依存しない部分（図柄、リール、役判定、画面描画） |
 | `slot_test.go` | ホストの Go で動くテスト |
 | `tools/gensprite/` | 画像を図柄用スプライトに変換するツール |
-| `img/` | Gopher の元画像と生成済みスプライト |
-| `M5Stack Basic スロットマシン 実装仕様書（TinyGo）.md` | 実装仕様書 |
+| `img/` | 生成済みの Gopher スプライト |
+| `m5stack-slotgame-plan.md` | 実装仕様書 |
 
 ## 開発
 
@@ -77,11 +100,11 @@ tinygo flash -target=wioterminal .
 ```sh
 go test .
 
-# 画面イメージを preview_*.png に書き出す
+# 画面イメージを preview_*.png（320×240）と preview_square_*.png（240×240）に書き出す
 go test -run TestPreview -preview .
 ```
 
-Gopher の画像を差し替えたら、`go generate` でスプライト（`img/*.rgba`）を作り直します。SVG を PNG にするために `rsvg-convert` が必要です。
+Gopher の画像を差し替えるときは、元画像（`img/gopher.svg` と `img/Gogophercolor.png`）を置いて `go generate` を実行し、スプライト（`img/*.rgba`）を作り直します。元画像はリポジトリに含めていません。SVG を PNG にするために `rsvg-convert` が必要です。
 
 色が反転して表示されるときは、使っているボードの `board_*.go` にある `displayInversion` を切り替えてください。
 

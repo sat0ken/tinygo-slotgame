@@ -17,28 +17,29 @@ import (
 
 var preview = flag.Bool("preview", false, "write preview PNGs")
 
-// fakeScreen は ili9341.Device と同じ座標チェックをする 320×240 の仮想液晶。
+// fakeScreen は液晶ドライバと同じ座標チェックをする仮想液晶（幅 w × 240）。
 type fakeScreen struct {
 	img  *image.RGBA
+	w    int16
 	errs int
 }
 
-func newFakeScreen() *fakeScreen {
-	return &fakeScreen{img: image.NewRGBA(image.Rect(0, 0, screenW, screenH))}
+func newFakeScreen(w int16) *fakeScreen {
+	return &fakeScreen{img: image.NewRGBA(image.Rect(0, 0, int(w), screenH)), w: w}
 }
 
-func (s *fakeScreen) Size() (int16, int16) { return screenW, screenH }
+func (s *fakeScreen) Size() (int16, int16) { return s.w, screenH }
 func (s *fakeScreen) Display() error       { return nil }
 
 func (s *fakeScreen) SetPixel(x, y int16, c color.RGBA) {
-	if x < 0 || y < 0 || x >= screenW || y >= screenH {
+	if x < 0 || y < 0 || x >= s.w || y >= screenH {
 		return
 	}
 	s.img.SetRGBA(int(x), int(y), c)
 }
 
 func (s *fakeScreen) FillRectangle(x, y, w, h int16, c color.RGBA) error {
-	if x < 0 || y < 0 || w <= 0 || h <= 0 || x+w > screenW || y+h > screenH {
+	if x < 0 || y < 0 || w <= 0 || h <= 0 || x+w > s.w || y+h > screenH {
 		s.errs++
 		return os.ErrInvalid
 	}
@@ -50,23 +51,9 @@ func (s *fakeScreen) FillRectangle(x, y, w, h int16, c color.RGBA) error {
 	return nil
 }
 
-func (s *fakeScreen) DrawRectangle(x, y, w, h int16, c color.RGBA) error {
-	s.FillRectangle(x, y, w, 1, c)
-	s.FillRectangle(x, y+h-1, w, 1, c)
-	s.FillRectangle(x, y, 1, h, c)
-	return s.FillRectangle(x+w-1, y, 1, h, c)
-}
-
-func (s *fakeScreen) DrawFastVLine(x, y0, y1 int16, c color.RGBA) error {
-	if y0 > y1 {
-		y0, y1 = y1, y0
-	}
-	return s.FillRectangle(x, y0, 1, y1-y0+1, c)
-}
-
 func (s *fakeScreen) DrawBitmap(x, y int16, b pixel.Image[pixel.RGB565BE]) error {
 	w, h := b.Size()
-	if x < 0 || y < 0 || int(x)+w > screenW || int(y)+h > screenH {
+	if x < 0 || y < 0 || int(x)+w > int(s.w) || int(y)+h > screenH {
 		s.errs++
 		return os.ErrInvalid
 	}
@@ -177,9 +164,17 @@ func TestEdges(t *testing.T) {
 	}
 }
 
+var layouts = map[string]layout{"wide": layoutWide, "square": layoutSquare}
+
 func TestGameFlow(t *testing.T) {
-	scr := newFakeScreen()
-	g := newGame(scr)
+	for name, lay := range layouts {
+		t.Run(name, func(t *testing.T) { testGameFlow(t, lay) })
+	}
+}
+
+func testGameFlow(t *testing.T, lay layout) {
+	scr := newFakeScreen(lay.screenW)
+	g := newGame(scr, lay)
 	t0 := time.Unix(0, 0)
 	now := t0
 	tick := func(p [3]bool) {
@@ -244,13 +239,82 @@ func TestGameFlow(t *testing.T) {
 	}
 }
 
+// 1 ボタンのときは、押すたびに左のリールから順に止まる。
+func TestOneButton(t *testing.T) {
+	scr := newFakeScreen(layoutSquare.screenW)
+	g := newGame(scr, layoutSquare)
+	g.oneButton = true
+	now := time.Unix(0, 0)
+	tick := func(p [3]bool) {
+		now = now.Add(frameTime)
+		g.step(p, now)
+	}
+	a := [3]bool{true}
+	none := [3]bool{}
+
+	tick(a)
+	if g.state != stateSpinning || g.credit != startCredit-bet {
+		t.Fatalf("after start: state=%d credit=%d", g.state, g.credit)
+	}
+	tick(a) // ロックアウト中は止まらない
+	if g.nextReel() != 0 {
+		t.Fatal("stop accepted during lockout")
+	}
+	for now.Sub(g.spinStart) < stopLockout {
+		tick(none)
+	}
+	for want := 0; want < 3; want++ {
+		if g.nextReel() != want {
+			t.Fatalf("next reel = %d, want %d", g.nextReel(), want)
+		}
+		tick(a)
+		for i := range g.reels {
+			if stopped := g.reels[i].stopping || !g.reels[i].spinning; stopped != (i <= want) {
+				t.Fatalf("after press %d: reel %d stopped=%v", want+1, i, stopped)
+			}
+		}
+		tick(none)
+	}
+	for g.state == stateSpinning {
+		tick(none)
+	}
+	win, _ := judge(g.reels[0].center(), g.reels[1].center(), g.reels[2].center())
+	if g.credit != startCredit-bet+win {
+		t.Fatalf("credit = %d, want %d", g.credit, startCredit-bet+win)
+	}
+	if scr.errs != 0 {
+		t.Fatalf("%d draw calls outside the screen", scr.errs)
+	}
+}
+
+// 画面のはみ出しや重なりがないか確かめるため、画面ごとに PNG を書き出す。
+// 320×240 は preview_*.png、240×240 は preview_square_*.png。
 func TestPreview(t *testing.T) {
 	if !*preview {
 		t.Skip("use -preview to write PNGs")
 	}
-	scr := newFakeScreen()
-	g := newGame(scr)
-	writePNG(t, "preview_idle.png", scr.img)
+	previewLayout(t, layoutWide, "preview_")
+	previewLayout(t, layoutSquare, "preview_square_")
+
+	// 1 ボタンで左のリールを止めたところ（中が次、右は順番待ち）
+	scr := newFakeScreen(layoutSquare.screenW)
+	g := newGame(scr, layoutSquare)
+	g.oneButton = true
+	now := time.Unix(0, 0)
+	g.step([3]bool{true}, now)
+	now = now.Add(stopLockout)
+	g.step([3]bool{true}, now)
+	for i := 0; i < 6; i++ {
+		now = now.Add(frameTime)
+		g.step([3]bool{}, now)
+	}
+	writePNG(t, "preview_square_onebutton.png", scr.img)
+}
+
+func previewLayout(t *testing.T, lay layout, prefix string) {
+	scr := newFakeScreen(lay.screenW)
+	g := newGame(scr, lay)
+	writePNG(t, prefix+"idle.png", scr.img)
 
 	// 回転中（スタートして少し回したところ）
 	now := time.Unix(0, 0)
@@ -259,7 +323,7 @@ func TestPreview(t *testing.T) {
 		now = now.Add(frameTime)
 		g.step([3]bool{}, now)
 	}
-	writePNG(t, "preview_spin.png", scr.img)
+	writePNG(t, prefix+"spin.png", scr.img)
 
 	// 7 を揃えたところ
 	for i := range g.reels {
@@ -271,7 +335,17 @@ func TestPreview(t *testing.T) {
 		now = now.Add(frameTime)
 		g.step([3]bool{}, now)
 	}
-	writePNG(t, "preview_win.png", scr.img)
+	writePNG(t, prefix+"win.png", scr.img)
+
+	// GAME OVER
+	g.credit = bet
+	g.step([3]bool{true}, now)
+	now = now.Add(stopLockout)
+	for i := range g.reels {
+		g.reels[i].offset = 0
+	}
+	g.step([3]bool{true, true, true}, now)
+	writePNG(t, prefix+"gameover.png", scr.img)
 	if scr.errs != 0 {
 		t.Fatalf("%d draw calls outside the screen", scr.errs)
 	}

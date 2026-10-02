@@ -6,7 +6,7 @@ Oct 1, 2026 · @satoken
 
 M5Stack Basic 上で動く3リールのスロットマシンを TinyGo で実装する。本体の物理ボタン A / B / C が、そのまま左 / 中 / 右リールのストップボタンになる。
 
-同じコードを Wio Terminal でも動かせる。ボードごとに違うのは初期化とボタンの割り当てだけで、ゲーム本体と画面レイアウトは共通（「Wio Terminal 対応」を参照）。
+同じコードを Wio Terminal と、Waveshare RP2040-Zero に ST7789 240×240 液晶を載せた 2 種類の基板（自作基板、gocon2026badge）でも動かせる。ボードごとに違うのは初期化、ボタンの割り当て、画面幅に応じた横方向の配置（`layout`）だけで、ゲーム本体は共通（「Wio Terminal 対応」「Waveshare RP2040-Zero 対応」を参照）。
 
 この仕様書は Claude Code に実装を任せるためのもの。ピン番号、ドライバ API、座標は TinyGo 0.42.0・drivers v0.36.0・tinyfont v0.7.0 のソースで確認済みで、この仕様で書いた試作コードは `tinygo build -target=m5stack` を通過している。
 
@@ -25,8 +25,8 @@ TinyGo 0.42.0 は Go 1.25〜1.27 を要求する。Go 1.24 以前では「requir
 | --- | --- |
 | TinyGo | 0.42.0（確認済み） |
 | Go | 1.26 系（1.26.8 で確認） |
-| ターゲット | `m5stack`（ESP32、M5Stack Basic / Gray 共通）、`wioterminal`（ATSAMD51） |
-| ドライバ | `tinygo.org/x/drivers` v0.36.0（`ili9341`, `pixel`） |
+| ターゲット | `m5stack`（ESP32、M5Stack Basic / Gray 共通）、`wioterminal`（ATSAMD51）、`waveshare-rp2040-zero`（RP2040） |
+| ドライバ | `tinygo.org/x/drivers` v0.36.0（`ili9341`, `st7789`, `pixel`） |
 | フォント | `tinygo.org/x/tinyfont` v0.7.0（`freesans`） |
 | 標準ライブラリ | `image/color`, `machine`, `strconv`, `time` のみ。バイナリを小さく保つため `fmt` は使わない |
 
@@ -35,13 +35,16 @@ TinyGo 0.42.0 は Go 1.25〜1.27 を要求する。Go 1.24 以前では「requir
 | ファイル | 内容 |
 | --- | --- |
 | `go.mod` / `go.sum` | モジュール `m5slot` |
-| `main.go` | メインループ（`//go:build tinygo`）。`initBoard()` を呼び、ボタンを読んで `game.step` を 30ms ごとに呼ぶ |
+| `main.go` | メインループ（`//go:build tinygo`）。`initBoard()` で液晶と `layout` を受け取り、ボタンを読んで `game.step` を 30ms ごとに呼ぶ |
 | `board_m5stack.go` | M5Stack の初期化（`//go:build m5stack`）。`displayInversion`、`buttons`、`initBoard()` |
 | `board_wioterminal.go` | Wio Terminal の初期化（`//go:build wioterminal`）。中身の構成は M5Stack と同じ |
-| `slot.go` | ハードに依存しない部分。図柄の事前描画、リール、停止ロジック、役判定、状態遷移、画面描画 |
+| `board_st7789.go` | RP2040-Zero + ST7789 の基板に共通の初期化（`//go:build waveshare_rp2040_zero`）。`st7789Board` 型 |
+| `board_rp2040zero.go` | RP2040-Zero 自作基板のピン（`//go:build waveshare_rp2040_zero && !gocon2026badge`） |
+| `board_gocon2026badge.go` | gocon2026badge のピン（`//go:build waveshare_rp2040_zero && gocon2026badge`） |
+| `slot.go` | ハードに依存しない部分。画面幅ごとの配置（`layout`）、図柄の事前描画、リール、停止ロジック、役判定、状態遷移、画面描画 |
 | `slot_test.go` | ホストで動くテスト。`go test -run TestPreview -preview .` で画面イメージを PNG に書き出す |
 | `tools/gensprite/` | 画像を図柄用スプライト（`.rgba`）に変換するホスト用ツール |
-| `img/` | Gopher の元画像と生成済みスプライト |
+| `img/` | 生成済みの Gopher スプライト（`.rgba`）。元画像はリポジトリに含めない |
 
 ```
 module m5slot
@@ -65,9 +68,17 @@ tinygo flash -target=m5stack -port=/dev/ttyUSB0 .
 # Wio Terminal
 tinygo build -target=wioterminal -size short -o slot_wioterminal.bin .
 tinygo flash -target=wioterminal .
+
+# Waveshare RP2040-Zero 自作基板
+tinygo build -target=waveshare-rp2040-zero -size short -o slot_waveshare-rp2040-zero.bin .
+tinygo flash -target=waveshare-rp2040-zero .
+
+# gocon2026badge（ターゲットは同じ RP2040-Zero。ビルドタグで基板を選ぶ）
+tinygo build -target=waveshare-rp2040-zero -tags gocon2026badge -size short -o slot_gocon2026badge.bin .
+tinygo flash -target=waveshare-rp2040-zero -tags gocon2026badge .
 ```
 
-`-size short` の値（Gopher 図柄入り）は、M5Stack が flash 55,060 バイト / RAM 23,520 バイト、Wio Terminal が flash 51,468 バイト / RAM 26,160 バイト。ポート名は環境に合わせて変える（Linux の M5Stack では `/dev/ttyUSB0`、Wio Terminal では `/dev/ttyACM0` が多い）。Wio Terminal で書き込みに失敗するときは、電源スイッチを下に素早く 2 回スライドしてブートローダーに入れてから再実行する。
+`-size short` の値（Gopher 図柄入り）は、M5Stack が flash 55,196 バイト / RAM 23,520 バイト、Wio Terminal が flash 51,692 バイト / RAM 26,160 バイト、RP2040-Zero の 2 基板がどちらも約 flash 54,370 バイト / RAM 24,796 バイト。ポート名は環境に合わせて変える（Linux の M5Stack では `/dev/ttyUSB0`、Wio Terminal では `/dev/ttyACM0` が多い）。Wio Terminal で書き込みに失敗するときは、電源スイッチを下に素早く 2 回スライドしてブートローダーに入れてから再実行する。RP2040-Zero で失敗するときは、BOOT ボタンを押しながら RESET を押して（または BOOT を押しながら USB を挿して）ブートローダーに入れる。
 
 ## ハードウェア仕様
 
@@ -141,6 +152,51 @@ bl.High()
 - `displayInversion` は `false`。色が反転して見えたら `board_wioterminal.go` の定数を切り替える。
 - 実機で動作確認済み。ボタンの割り当て（左から KEY_C / KEY_B / KEY_A）、色（`displayInversion` = `false`）、回転の滑らかさは M5Stack と同じく問題なし。
 
+### Waveshare RP2040-Zero 対応
+
+RP2040-Zero に ST7789（240×240）液晶とタクトスイッチを載せた基板を 2 種類サポートする。どちらもターゲットは `waveshare-rp2040-zero` なので、ビルドタグ `gocon2026badge` の有無で基板を選ぶ。
+
+共通部分（`board_st7789.go`）:
+
+- 液晶は SPI1（SCK=GP10、SDA/MOSI=GP11）。GP12 はどちらの基板でも液晶の制御線（DC または BL）に使うので、SPI の `SDI` は `machine.NoPin` にする。
+- 基板ごとの違い（RESET / DC / CS / BL のピン、回転、使わないピン）は `st7789Board` 型で渡し、`init()` で初期化する。
+- ボタンは押すと GND に落ちる。外部プルアップが無いので `machine.PinInputPullup` を使う。
+- 使わない出力（スピーカー、DAC、WS2812B のデータ線）は出力 Low に固定する。
+
+```go
+machine.SPI1.Configure(machine.SPIConfig{
+	SCK:       machine.GP10,
+	SDO:       machine.GP11,
+	SDI:       machine.NoPin,
+	Frequency: 40e6,
+})
+display := st7789.New(machine.SPI1, b.rst, b.dc, b.cs, b.bl)
+display.Configure(st7789.Config{Width: 240, Height: 240, Rotation: b.rotation})
+display.InvertColors(displayInversion) // 既定 true
+```
+
+ピンの違い:
+
+| 用途 | 自作基板（`board_rp2040zero.go`） | gocon2026badge（`board_gocon2026badge.go`） |
+| --- | --- | --- |
+| ストップボタン（1 ボタン） | GP3（SW1） | GP3（BTN_A） |
+| 3 ボタンにする場合の左 / 中 / 右 | GP3 / GP4 / GP5（SW1 / SW2 / SW3） | GP28 / GP29 / GP4（十字キーの左 / 下 / 右） |
+| 液晶 RESET | GP9 | GP15 |
+| 液晶 DC | GP12 | GP14 |
+| 液晶 CS | GP13 | GP13 |
+| 液晶 BL | GP14 | GP12 |
+| 回転 | `ROTATION_90` | `ROTATION_90` |
+| Low に固定するピン | GP2（スピーカー）、GP29（WS2812B） | GP0〜GP2（PCM510x DIN / BCK / LRCK）、GP9（WS2812B × 16） |
+| 使わないピン | SW4（GP6）、SW5（GP26）、SW6（GP15）、I2C（GP0/GP1） | BTN_UP（GP8）、BTN_A（GP3）、BTN_B（GP6）、I2C0（GP4/GP5）、I2C1（GP26/GP27） |
+
+- どちらの基板も A ボタンだけで遊ぶ（1 ボタンモード、「操作」を参照）。`buttons` を 3 つにすれば、左・中・右を別々に止める遊び方に戻せる。
+- `st7789` ドライバには `DrawRectangle` が無く、`DrawFastVLine` は error を返さない。どちらのドライバでも使えるよう、`screen` インターフェースは `FillRectangle` と `DrawBitmap` だけにし、枠と三角マーカーは `FillRectangle` で描く。
+- `st7789.Configure` は常に反転 ON（INVON）にする。`displayInversion` で `InvertColors` を呼び直すので、色が反転して見えたら `false` にする。
+- 回転を `ROTATION_180` / `ROTATION_270` にする場合は、240×240 の液晶ではドライバの `RowOffset: 80` が必要になる（液晶コントローラーのメモリが 240×320 のため）。
+- 基板上の WS2812（GP16）は使わない。
+- 画面が 240×240 なので、横方向は `layoutSquare` の配置を使う（「画面レイアウト」を参照）。
+- どちらの基板も実機で表示を確認済み（`ROTATION_90`、`displayInversion` = `true`）。1 ボタンモードは実機では未確認。
+
 ## ゲーム仕様
 
 乱数は使わない。リール配列は固定で、結果はプレイヤーがボタンを押したタイミングだけで決まる（目押し型）。
@@ -155,12 +211,21 @@ bl.High()
 
 ボタンは「押された瞬間」（前フレームで離されていて、今フレームで押されている）だけを入力として扱う。押しっぱなしで連続スタートしないようにするため。
 
+#### 1 ボタンモード
+
+ボードの `buttons` が 1 つだけのとき（RP2040-Zero の 2 基板は A ボタンだけ）は、`main.go` が `game.oneButton = true` にする。
+
+- スタートは 3 ボタンのときと同じく、ボタンを押すと始まる。
+- 回転中（開始から 300ms 以降）にボタンを押すたびに、左 → 中 → 右の順に 1 本ずつ停止要求を出す。次に止めるのは「回転中で停止要求の出ていない一番左のリール」（`nextReel()`）。前のリールが滑っている間に次を押してもよい。
+- STOP ラベルは、次に止まるリールを赤地に白文字、順番待ちのリールを暗い赤 (120,0,0) 地に灰文字、停止要求を出したリールと停止中のリールを灰地にする。
+
 ### 状態遷移
 
 | 状態 | 入力・条件 | 処理 | 次の状態 |
 | --- | --- | --- | --- |
 | `stateIdle` | いずれかのボタンが押された | クレジット -3、メッセージ消去、全リール回転開始、ラベルを赤に | `stateSpinning` |
 | `stateSpinning` | 開始から 300ms 以降にボタン i が押された | リール i に停止要求 | `stateSpinning` |
+| `stateSpinning`（1 ボタン） | 開始から 300ms 以降にボタンが押された | `nextReel()` に停止要求、ラベルを更新 | `stateSpinning` |
 | `stateSpinning` | 全リール停止、配当加算後もクレジット ≥ 3 | 役判定、配当加算、結果メッセージ | `stateIdle` |
 | `stateSpinning` | 全リール停止、配当加算後のクレジット < 3 | 「GAME OVER - PRESS ANY BUTTON」を赤で表示 | `stateGameOver` |
 | `stateGameOver` | いずれかのボタンが押された | クレジットを 50 に戻す | `stateIdle` |
@@ -203,6 +268,19 @@ bl.High()
 ## 画面レイアウト
 
 画面は 320×240。リールの中心 X（68, 160, 252）を物理ボタン A/B/C の真上に合わせ、「このボタンでこのリールが止まる」と一目で分かるようにする。
+
+240×240 の画面（RP2040-Zero の 2 基板）でも縦方向の配置は同じ。横方向だけを `layout` で切り替える。
+
+| 項目 | `layoutWide`（320×240） | `layoutSquare`（240×240） |
+| --- | --- | --- |
+| 1コマの幅 `symW` | 84 | 70 |
+| リールの左端 `reelX` | 26 / 118 / 210 | 8 / 85 / 162 |
+| 三角マーカー | x=8 から幅 10（高さ 19） | x=0 から幅 5（高さ 9） |
+| GAME OVER のメッセージ | `GAME OVER - PRESS ANY BUTTON` | `GAME OVER`（長いメッセージは 315px で画面に収まらない） |
+
+- 図柄は幅 84 のコマを基準にした座標で描き、`canvas.ox = symW/2 - 42` だけ横にずらして実際の幅に収める。
+- BAR の黒枠はコマ幅 − 16（幅 84 で 68）。「BAR」を `Bold12pt7b` で描くと枠に収まらないときは `Bold9pt7b`（ベースライン y=31）にする。
+- クレジットを消す範囲は `max(screenW-170, 「SLOT」の右端+4)` から画面右端まで。文字の右端は `screenW-8`。
 
 ```
 y=0   +--------------------------------------------------+
@@ -270,7 +348,7 @@ Gopher のスプライト:
 
 | 定数 | 値 | 意味 |
 | --- | --- | --- |
-| `symW` / `symH` | 84 / 50 | 1コマのサイズ |
+| `symH` | 50 | 1コマの高さ。幅 `symW` は `layout` ごとに決める（84 または 70） |
 | `visibleRows` | 3 | 窓に見えるコマ数。`reelH = symH * visibleRows` = 150 |
 | `reelY` | 42 | リール窓の上端 |
 | `spinSpeed` | 12 | 1フレームで進むピクセル数。目押しの難易度を決める |
@@ -278,11 +356,11 @@ Gopher のスプライト:
 | `stopLockout` | 300ms | スタート直後にストップを無視する時間 |
 | `bet` / `startCredit` | 3 / 50 |  |
 | `displayInversion` | false | 液晶の色反転 |
-| `reelX` | \[26, 118, 210\] | 各リールの左端（変数） |
+| `layoutWide` / `layoutSquare` | 「画面レイアウト」を参照 | 画面幅ごとの横方向の配置。`initBoard()` が返す |
 
 ### 図柄の事前描画
 
-- 図柄ごとに `pixel.NewImage[pixel.RGB565BE](84, 50)` を作り、`symbolImgs [numSymbols]` に保持する（計 21KB）。
+- 図柄ごとに `pixel.NewImage[pixel.RGB565BE](symW, 50)` を作り、`[numSymbols]` の配列に保持する（幅 84 で計 42KB、幅 70 で計 35KB）。
 - 画像に描くための `canvas` 型を作る。`drivers.Displayer`（`Size()`, `SetPixel()`, `Display() error`）を実装し、`tinyfont.WriteLine` からも文字を描けるようにする。`SetPixel` では範囲外を無視し、`pixel.NewColor[pixel.RGB565BE](r, g, b)` で変換して `img.Set` する。
 - `canvas` には `fillRect`, `fillCircle`, `line`（半径付きの太線、円を線上に並べる）, `textCentered`（`tinyfont.LineWidth` の outbox 幅で中央寄せ）を持たせる。
 
