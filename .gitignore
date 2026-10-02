@@ -32,4 +32,4 @@ go.work.sum
 # .vscode/
 slot*.bin
 preview_*.png
-img/gopher_svg.png
+img/*.png
