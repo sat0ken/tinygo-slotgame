@@ -42,7 +42,9 @@ TinyGo 0.42.0 は Go 1.25〜1.27 を要求する。Go 1.24 以前では「requir
 | `board_rp2040zero.go` | RP2040-Zero 自作基板のピン（`//go:build waveshare_rp2040_zero && !gocon2026badge`） |
 | `board_gocon2026badge.go` | gocon2026badge のピン（`//go:build waveshare_rp2040_zero && gocon2026badge`） |
 | `slot.go` | ハードに依存しない部分。画面幅ごとの配置（`layout`）、図柄の事前描画、リール、停止ロジック、役判定、状態遷移、画面描画 |
+| `roulette.go` | 隠しルーレット（お酒の図柄、リール配列、配当、ダブルクリック判定）。ハードに依存しない |
 | `slot_test.go` | ホストで動くテスト。`go test -run TestPreview -preview .` で画面イメージを PNG に書き出す |
+| `tools/pinscan/` | RP2040-Zero のボタンがどの GPIO につながっているかを USB シリアルに表示する実機用ツール（`tinygo flash -target=waveshare-rp2040-zero -monitor ./tools/pinscan`） |
 | `tools/gensprite/` | 画像を図柄用スプライト（`.rgba`）に変換するホスト用ツール |
 | `img/` | 生成済みの Gopher スプライト（`.rgba`）。元画像はリポジトリに含めない |
 
@@ -180,14 +182,14 @@ display.InvertColors(displayInversion) // 既定 true
 | 用途 | 自作基板（`board_rp2040zero.go`） | gocon2026badge（`board_gocon2026badge.go`） |
 | --- | --- | --- |
 | ストップボタン（1 ボタン） | GP3（SW1） | GP3（BTN_A） |
-| 3 ボタンにする場合の左 / 中 / 右 | GP3 / GP4 / GP5（SW1 / SW2 / SW3） | GP28 / GP29 / GP4（十字キーの左 / 下 / 右） |
+| 3 ボタンにする場合の左 / 中 / 右 | GP3 / GP4 / GP5（SW1 / SW2 / SW3） | 十字キーの左 / 下 / 右（右は GP4。ほかは `tools/pinscan` で確かめる） |
 | 液晶 RESET | GP9 | GP15 |
 | 液晶 DC | GP12 | GP14 |
 | 液晶 CS | GP13 | GP13 |
 | 液晶 BL | GP14 | GP12 |
 | 回転 | `ROTATION_90` | `ROTATION_90` |
 | Low に固定するピン | GP2（スピーカー）、GP29（WS2812B） | GP0〜GP2（PCM510x DIN / BCK / LRCK）、GP9（WS2812B × 16） |
-| 使わないピン | SW4（GP6）、SW5（GP26）、SW6（GP15）、I2C（GP0/GP1） | BTN_UP（GP8）、BTN_A（GP3）、BTN_B（GP6）、I2C0（GP4/GP5）、I2C1（GP26/GP27） |
+| 使わないピン | SW4（GP6）、SW5（GP26）、SW6（GP15）、I2C（GP0/GP1） | BTN_A（GP3）、BTN_B（GP6）、I2C0（GP4/GP5）、I2C1（GP26/GP27） |
 
 - どちらの基板も A ボタンだけで遊ぶ（1 ボタンモード、「操作」を参照）。`buttons` を 3 つにすれば、左・中・右を別々に止める遊び方に戻せる。
 - `st7789` ドライバには `DrawRectangle` が無く、`DrawFastVLine` は error を返さない。どちらのドライバでも使えるよう、`screen` インターフェースは `FillRectangle` と `DrawBitmap` だけにし、枠と三角マーカーは `FillRectangle` で描く。
@@ -264,6 +266,59 @@ display.InvertColors(displayInversion) // 既定 true
 | ハズレ | 0 | `PRESS ANY BUTTON`（白） |
 
 当たり時のメッセージは黄色で表示する。
+
+### 隠しルーレット（gocon2026badge）
+
+gocon2026badge だけの隠しモード。停止中に BTN_UP（GP28）を 1 秒以内に 2 回押すと、図柄がすべてお酒のリールに切り替わる。もう一度 2 回押すと通常のスロットに戻る。
+
+- ボードの `secretButton` で隠しボタンを指定する。gocon2026badge は `machine.GP28`（回路図では GP8 だが、実機を `tools/pinscan` で調べると GP28 だった）、ほかのボードは `machine.NoPin`（隠しモード無し）。
+- `main.go` が隠しボタンの立ち下がりで `game.secretPressed(now)` を呼ぶ。停止中（`stateIdle`）に `doubleClickTime`（1 秒）以内に 2 回押されたら切り替える。回転中と GAME OVER 中の押下は無視し、1 回目の押下も取り消す。
+- 切り替えると、リールを先頭（`offset` = 0）に戻して画面全体を描き直す。クレジットはそのまま引き継ぐ。1ゲーム 3 クレジット、3 未満で GAME OVER になるのも通常と同じ。
+- タイトルは「BAR」、切り替え直後のメッセージは「SAKE ROULETTE!」（黄）。
+- 図柄のセットは `symbolSet`（タイトル、メッセージ、図柄の数、リール配列、描画関数、役判定）で表し、通常は `slotSet`、隠しルーレットは `rouletteSet`。図柄画像はセットごとに最初の 1 回だけ作り、`symCache` に残す（240×240 では 8 図柄で約 56KB）。
+
+図柄は 7 種類のお酒と、ハズレの水。各リール 12 コマで、お酒が 1 つずつ、残り 5 コマが水。
+
+| コマ | 左リール | 中リール | 右リール |
+| --- | --- | --- | --- |
+| 0 | ビール | ビール | ビール |
+| 1 | 水 | 水 | 水 |
+| 2 | 日本酒 | ワイン | カクテル |
+| 3 | 焼酎 | ホッピー | 水 |
+| 4 | 水 | 水 | ウィスキー |
+| 5 | ウィスキー | 日本酒 | 日本酒 |
+| 6 | ワイン | カクテル | 水 |
+| 7 | 水 | 水 | ホッピー |
+| 8 | カクテル | 焼酎 | 焼酎 |
+| 9 | 水 | ウィスキー | 水 |
+| 10 | ホッピー | 水 | ワイン |
+| 11 | 水 | 水 | 水 |
+
+中段に同じお酒が 3 つ揃ったときだけ当たり。それ以外はすべてハズレ（水）。
+
+| 役 | 配当 | メッセージ（黄） |
+| --- | --- | --- |
+| ホッピー × 3 | 100 | `HOPPY! +100` |
+| ワイン × 3 | 50 | `WINE! +50` |
+| ウィスキー × 3 | 30 | `WHISKY! +30` |
+| 日本酒 × 3 | 20 | `NIHONSHU! +20` |
+| 焼酎 × 3 | 20 | `SHOCHU! +20` |
+| カクテル × 3 | 15 | `COCKTAIL! +15` |
+| ビール × 3 | 10 | `BEER! +10` |
+| ハズレ | 0 | `Lose...You can't drink`（白） |
+
+図柄は画像素材を使わず、矩形・円・線で描く（幅 84 のコマ基準の座標）。各コマの下に `proggy.TinySZ8pt7b` で名前（ベースライン y=47）を入れる。
+
+| 図柄 | 描き方 |
+| --- | --- |
+| ビール | 琥珀色のジョッキに白い泡（円 4 つ）と灰色の取っ手 |
+| 日本酒 | 藍色の徳利と、白地に藍色の縁と蛇の目のお猪口 |
+| 焼酎 | 緑の一升瓶に白いラベルと赤い帯 |
+| ウィスキー | 灰色のロックグラスに琥珀色のウィスキーと氷 2 つ |
+| ワイン | ワイングラスの下半分に赤ワイン |
+| カクテル | 逆三角のカクテルグラスにピンクのカクテルとオリーブ |
+| ホッピー | 茶色の瓶に白と青のラベル |
+| 水 | 青い水滴 |
 
 ## 画面レイアウト
 

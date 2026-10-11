@@ -18,6 +18,9 @@ const displayInversion = true
 // 3 ボタンで左・中・右を別々に止めるときは {machine.GP3, machine.GP4, machine.GP5}（SW1 / SW2 / SW3）にする。
 var buttons = []machine.Pin{machine.GP3}
 
+// 隠しルーレットに入るボタンは無い。
+var secretButton = machine.NoPin
+
 func initBoard() (screen, layout) {
 	return st7789Board{
 		rst:      machine.GP9,

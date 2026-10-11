@@ -309,6 +309,34 @@ func TestPreview(t *testing.T) {
 		g.step([3]bool{}, now)
 	}
 	writePNG(t, "preview_square_onebutton.png", scr.img)
+
+	// 隠しルーレット（起動直後とビールが揃ったところ、全図柄の一覧）
+	g = newGame(scr, layoutSquare)
+	g.oneButton = true
+	g.useSet(&rouletteSet)
+	writePNG(t, "preview_square_roulette.png", scr.img)
+	g.step([3]bool{true}, now)
+	now = now.Add(stopLockout)
+	for i := range g.reels {
+		g.reels[i].offset = symH
+		g.step([3]bool{true}, now)
+	}
+	for g.state == stateSpinning {
+		now = now.Add(frameTime)
+		g.step([3]bool{}, now)
+	}
+	writePNG(t, "preview_square_roulette_win.png", scr.img)
+
+	sheet := image.NewRGBA(image.Rect(0, 0, layoutSquare.symW*4, symH*2))
+	for i, img := range makeSymbols(&rouletteSet, layoutSquare.symW) {
+		ox, oy := (i%4)*layoutSquare.symW, (i/4)*symH
+		for y := 0; y < symH; y++ {
+			for x := 0; x < layoutSquare.symW; x++ {
+				sheet.SetRGBA(ox+x, oy+y, img.Get(x, y).RGBA())
+			}
+		}
+	}
+	writePNG(t, "preview_drinks.png", sheet)
 }
 
 func previewLayout(t *testing.T, lay layout, prefix string) {
@@ -369,4 +397,78 @@ func writePNG(t *testing.T, name string, img image.Image) {
 		t.Fatal(err)
 	}
 	t.Logf("wrote %s", name)
+}
+
+func TestJudgeDrinks(t *testing.T) {
+	for d := uint8(0); d < numDrinks; d++ {
+		win, msg := judgeDrinks(d, d, d)
+		if win != drinks[d].pay {
+			t.Errorf("%s x3 = %d (%q), want %d", drinks[d].name, win, msg, drinks[d].pay)
+		}
+	}
+	if win, msg := judgeDrinks(drinkBeer, drinkBeer, drinkWine); win != 0 || msg != "Lose...You can't drink" {
+		t.Errorf("miss = %d %q", win, msg)
+	}
+	for i, s := range drinkStrips {
+		if len(s) != len(strips[i]) {
+			t.Errorf("drink strip %d has %d symbols", i, len(s))
+		}
+	}
+}
+
+// 停止中に 1 秒以内に 2 回押すと隠しルーレットに入り、もう一度で戻る。
+func TestSecretRoulette(t *testing.T) {
+	for name, lay := range layouts {
+		t.Run(name, func(t *testing.T) {
+			scr := newFakeScreen(lay.screenW)
+			g := newGame(scr, lay)
+			g.oneButton = true
+			now := time.Unix(0, 0)
+
+			g.secretPressed(now)
+			g.secretPressed(now.Add(doubleClickTime + time.Millisecond)) // 間が空きすぎ
+			if g.set != &slotSet {
+				t.Fatal("slow double click should not switch")
+			}
+			now = now.Add(5 * time.Second)
+			g.secretPressed(now)
+			g.secretPressed(now.Add(200 * time.Millisecond))
+			if g.set != &rouletteSet || g.reels[0].strip[0] != drinkBeer {
+				t.Fatal("double click should enter roulette")
+			}
+
+			// 回転中のダブルクリックは無視する
+			now = now.Add(5 * time.Second)
+			g.step([3]bool{true}, now)
+			g.secretPressed(now)
+			g.secretPressed(now.Add(100 * time.Millisecond))
+			if g.set != &rouletteSet {
+				t.Fatal("double click while spinning should be ignored")
+			}
+
+			// ルーレットで 1 ゲーム（中段にビールを揃える）
+			now = now.Add(stopLockout)
+			for i := range g.reels {
+				g.reels[i].offset = symH // 中段 = 先頭のビール。押す直前に合わせる
+				g.step([3]bool{true}, now)
+			}
+			for g.state == stateSpinning {
+				now = now.Add(frameTime)
+				g.step([3]bool{}, now)
+			}
+			if g.credit != startCredit-bet+drinks[drinkBeer].pay {
+				t.Fatalf("credit = %d", g.credit)
+			}
+
+			now = now.Add(5 * time.Second)
+			g.secretPressed(now)
+			g.secretPressed(now.Add(100 * time.Millisecond))
+			if g.set != &slotSet || g.credit != startCredit-bet+drinks[drinkBeer].pay {
+				t.Fatalf("should return to slot keeping credit: set=%s credit=%d", g.set.title, g.credit)
+			}
+			if scr.errs != 0 {
+				t.Fatalf("%d draw calls outside the screen", scr.errs)
+			}
+		})
+	}
 }

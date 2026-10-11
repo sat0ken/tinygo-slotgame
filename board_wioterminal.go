@@ -17,6 +17,9 @@ const displayInversion = false
 // 左から KEY_C / KEY_B / KEY_A の順に並ぶ。
 var buttons = []machine.Pin{machine.WIO_KEY_C, machine.WIO_KEY_B, machine.WIO_KEY_A}
 
+// 隠しルーレットに入るボタンは無い。
+var secretButton = machine.NoPin
+
 func initBoard() (screen, layout) {
 	// ブザーは使わないが、浮いているとノイズが出るので Low に固定する。
 	bz := machine.WIO_BUZZER

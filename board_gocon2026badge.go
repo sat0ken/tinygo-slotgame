@@ -15,8 +15,12 @@ import (
 const displayInversion = true
 
 // BTN_A だけで遊ぶ。押すたびに左のリールから順に止まる。
-// 3 ボタンで左・中・右を別々に止めるときは {machine.GP28, machine.GP29, machine.GP4}（十字キーの左 / 下 / 右）にする。
+// 3 ボタンで左・中・右を別々に止めるときは、十字キーの左 / 下 / 右のピンを並べる（右は GP4。
+// 回路図と実機でピンが違うことがあるので、tools/pinscan で確かめてから指定する）。
 var buttons = []machine.Pin{machine.GP3}
+
+// BTN_UP（実機では GP28）をダブルクリックすると隠しルーレットに入る（もう一度ダブルクリックで戻る）。
+var secretButton = machine.GP28
 
 func initBoard() (screen, layout) {
 	return st7789Board{

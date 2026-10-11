@@ -219,14 +219,33 @@ func abs(v int) int {
 	return v
 }
 
-func makeSymbols(symW int) [numSymbols]pixel.Image[pixel.RGB565BE] {
-	var imgs [numSymbols]pixel.Image[pixel.RGB565BE]
+// symbolSet は図柄のセット。通常のスロット（slotSet）と隠しルーレット（rouletteSet）がある。
+type symbolSet struct {
+	title  string                    // 左上に出すタイトル
+	ready  string                    // このセットに切り替えたときのメッセージ
+	count  int                       // 図柄の種類
+	strips [3][]uint8                // リール配列
+	draw   func(c canvas, sym uint8) // 図柄を 1 つ描く
+	judge  func(l, c, r uint8) (int, string)
+}
+
+var slotSet = symbolSet{
+	title:  "SLOT",
+	ready:  "PRESS ANY BUTTON",
+	count:  int(numSymbols),
+	strips: strips,
+	draw:   drawSymbol,
+	judge:  judge,
+}
+
+func makeSymbols(set *symbolSet, symW int) []pixel.Image[pixel.RGB565BE] {
+	imgs := make([]pixel.Image[pixel.RGB565BE], set.count)
 	for i := range imgs {
 		imgs[i] = pixel.NewImage[pixel.RGB565BE](symW, symH)
 		bg := canvas{img: imgs[i]}
 		bg.fillRect(0, 0, symW, symH, colCell)
 		bg.fillRect(0, symH-1, symW, 1, colDivider)
-		drawSymbol(canvas{img: imgs[i], ox: symW/2 - 42}, uint8(i))
+		set.draw(canvas{img: imgs[i], ox: symW/2 - 42}, uint8(i))
 	}
 	return imgs
 }
@@ -316,7 +335,7 @@ func (r *reel) center() uint8 {
 }
 
 // render はリールの見えている部分を buf（コマ幅×150）に描く。
-func (r *reel) render(buf pixel.Image[pixel.RGB565BE], syms *[numSymbols]pixel.Image[pixel.RGB565BE]) {
+func (r *reel) render(buf pixel.Image[pixel.RGB565BE], syms []pixel.Image[pixel.RGB565BE]) {
 	w, _ := buf.Size()
 	rowBytes := w * 2
 	dst := buf.RawBuffer()
@@ -367,23 +386,39 @@ const (
 )
 
 type game struct {
-	scr       screen
-	lay       layout
-	oneButton bool // true ならボタン 1 つで、押すたびに左のリールから順に止める
-	syms      [numSymbols]pixel.Image[pixel.RGB565BE]
-	reelImg   pixel.Image[pixel.RGB565BE]
-	reels     [3]reel
-	state     int
-	credit    int
-	spinStart time.Time
+	scr        screen
+	lay        layout
+	oneButton  bool // true ならボタン 1 つで、押すたびに左のリールから順に止める
+	set        *symbolSet
+	syms       []pixel.Image[pixel.RGB565BE] // set の図柄画像
+	symCache   map[*symbolSet][]pixel.Image[pixel.RGB565BE]
+	reelImg    pixel.Image[pixel.RGB565BE]
+	reels      [3]reel
+	state      int
+	credit     int
+	spinStart  time.Time
+	lastSecret time.Time // 隠しボタンを最後に押した時刻（ダブルクリック判定用）
 }
 
 func newGame(scr screen, lay layout) *game {
 	g := &game{scr: scr, lay: lay, credit: startCredit}
-	g.syms = makeSymbols(lay.symW)
 	g.reelImg = pixel.NewImage[pixel.RGB565BE](lay.symW, reelH)
+	g.useSet(&slotSet)
+	return g
+}
+
+// useSet は図柄のセットを切り替え、リールを先頭に戻して画面全体を描き直す。
+// 図柄画像はセットごとに最初の1回だけ作る。
+func (g *game) useSet(set *symbolSet) {
+	if g.symCache == nil {
+		g.symCache = map[*symbolSet][]pixel.Image[pixel.RGB565BE]{}
+	}
+	if g.symCache[set] == nil {
+		g.symCache[set] = makeSymbols(set, g.lay.symW)
+	}
+	g.set, g.syms = set, g.symCache[set]
 	for i := range g.reels {
-		g.reels[i].strip = strips[i]
+		g.reels[i] = reel{strip: set.strips[i]}
 	}
 	g.drawStatic()
 	g.drawCredit()
@@ -391,8 +426,7 @@ func newGame(scr screen, lay layout) *game {
 		g.drawReel(i)
 	}
 	g.drawLabels()
-	g.drawMessage("PRESS ANY BUTTON", colYellow)
-	return g
+	g.drawMessage(set.ready, colYellow)
 }
 
 // edges は押された瞬間（前フレームで離されていて、今フレームで押されている）だけを true にする。
@@ -463,7 +497,7 @@ func (g *game) step(pressed [3]bool, now time.Time) {
 		}
 		g.credit = startCredit
 		g.drawCredit()
-		g.drawMessage("PRESS ANY BUTTON", colYellow)
+		g.drawMessage(g.set.ready, colYellow)
 		g.state = stateIdle
 	}
 }
@@ -479,7 +513,7 @@ func (g *game) nextReel() int {
 }
 
 func (g *game) finishSpin() {
-	win, msg := judge(g.reels[0].center(), g.reels[1].center(), g.reels[2].center())
+	win, msg := g.set.judge(g.reels[0].center(), g.reels[1].center(), g.reels[2].center())
 	g.credit += win
 	g.drawCredit()
 	switch {
@@ -500,7 +534,7 @@ func (g *game) finishSpin() {
 func (g *game) drawStatic() {
 	s, l := g.scr, &g.lay
 	s.FillRectangle(0, 0, l.screenW, screenH, colBG)
-	tinyfont.WriteLine(s, &freesans.Bold12pt7b, 8, 26, "SLOT", colYellow)
+	tinyfont.WriteLine(s, &freesans.Bold12pt7b, 8, 26, g.set.title, colYellow)
 	w := int16(l.symW)
 	for _, x := range l.reelX {
 		g.drawFrame(x-1, reelY-1, w+2, reelH+2)
@@ -526,7 +560,7 @@ func (g *game) drawFrame(x, y, w, h int16) {
 func (g *game) drawCredit() {
 	s, sw := g.scr, g.lay.screenW
 	// 右寄せの「CREDIT n」を消す範囲。左の「SLOT」にはかからないようにする。
-	_, tw := tinyfont.LineWidth(&freesans.Bold12pt7b, "SLOT")
+	_, tw := tinyfont.LineWidth(&freesans.Bold12pt7b, g.set.title)
 	x := max(sw-170, 8+int16(tw)+4)
 	s.FillRectangle(x, 4, sw-x, 30, colBG)
 	str := "CREDIT " + strconv.Itoa(g.credit)
@@ -545,7 +579,7 @@ func (g *game) drawMessage(msg string, col color.RGBA) {
 }
 
 func (g *game) drawReel(i int) {
-	g.reels[i].render(g.reelImg, &g.syms)
+	g.reels[i].render(g.reelImg, g.syms)
 	g.scr.DrawBitmap(g.lay.reelX[i], reelY, g.reelImg)
 }
 

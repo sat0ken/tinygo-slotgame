@@ -16,6 +16,9 @@ const displayInversion = false
 // 左・中・右リールのストップボタン。本体前面の A / B / C がリールの真下に並ぶ。
 var buttons = []machine.Pin{machine.BUTTON_A, machine.BUTTON_B, machine.BUTTON_C}
 
+// 隠しルーレットに入るボタンは無い。
+var secretButton = machine.NoPin
+
 func initBoard() (screen, layout) {
 	// スピーカーは使わないが、浮いているとノイズが出るので Low に固定する。
 	spk := machine.SPEAKER_PIN
